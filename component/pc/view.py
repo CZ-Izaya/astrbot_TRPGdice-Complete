@@ -25,8 +25,28 @@ COC_TAIL_DISPLAY_ORDER = (
     "安抚本章已用",
 )
 
+# 核心属性固定置顶，按此顺序展示；其余属性再按数值从大到小。
+COC_PRIMARY_DISPLAY_ORDER = (
+    "力量",
+    "敏捷",
+    "体质",
+    "外貌",
+    "智力",
+    "灵感",
+    "意志",
+    "教育",
+    "体型",
+    "幸运",
+    "体力",
+    "魔法",
+    "理智",
+)
+
 # 数值属性与说明性信息之间的分隔线
 COC_TAIL_SEPARATOR = "——————"
+
+# 与其它属性同义、但卡面上单独占一行的显示名（检定仍按同义键解析）
+COC_INDEPENDENT_DISPLAY_NAMES = frozenset({"灵感"})
 
 
 def _is_number(value) -> bool:
@@ -35,17 +55,25 @@ def _is_number(value) -> bool:
 
 def sort_display_attributes(primary_attributes: dict) -> list:
     """
-    排序规则：数值从大到小；说明性信息（上限/阈值/累计/状态）统一放到最后。
+    排序规则：核心属性（力量/敏捷/…/理智）固定置顶且顺序固定；
+    其余数值属性从大到小；说明性信息（上限/阈值/累计/状态）统一放到最后。
     返回 [(display_name, original_attr, value), ...]
     """
+    primary_items = []
     main_items = []
     tail_items = []
     for display_name, (original_attr, value) in primary_attributes.items():
         item = (display_name, original_attr, value)
         if display_name in COC_TAIL_DISPLAY_ORDER:
             tail_items.append(item)
+        elif display_name in COC_PRIMARY_DISPLAY_ORDER:
+            primary_items.append(item)
         else:
             main_items.append(item)
+
+    def primary_key(item):
+        display_name = item[0]
+        return (0, COC_PRIMARY_DISPLAY_ORDER.index(display_name))
 
     def main_key(item):
         display_name, _attr, value = item
@@ -61,9 +89,10 @@ def sort_display_attributes(primary_attributes: dict) -> list:
         except ValueError:
             return (1, len(COC_TAIL_DISPLAY_ORDER))
 
+    primary_items.sort(key=primary_key)
     main_items.sort(key=main_key)
     tail_items.sort(key=tail_key)
-    return main_items + tail_items
+    return primary_items + main_items + tail_items
 
 
 def get_primary_attributes(attributes: dict) -> dict:
@@ -71,6 +100,11 @@ def get_primary_attributes(attributes: dict) -> dict:
     primary_attributes = {}
     for attr, value in attributes.items():
         if is_hidden_coc_skill(attr):
+            continue
+        # 灵感虽与智力同义（检定仍走智力），但卡面单独占一行
+        if str(attr) in COC_INDEPENDENT_DISPLAY_NAMES:
+            display_name = str(attr)
+            primary_attributes.setdefault(display_name, (attr, value))
             continue
         primary_name = SYNONYMS.SYNONYM_MAP.get(attr, attr)
         if is_hidden_coc_skill(primary_name):
