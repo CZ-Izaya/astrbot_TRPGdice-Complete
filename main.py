@@ -34,12 +34,13 @@ from .component.logs.store import JSONLoggerCore
 from .component.combat.init import InitiativeItem, InitiativeManager
 from .component.roll.parser import parse_inline_command, strip_command_prefix
 from .component.pc.view import (
+    COC_TAIL_DISPLAY_ORDER,
     clean_st_show_words,
     format_all_attributes,
     format_named_attributes,
+    format_sorted_attribute_lines,
     format_threshold_attributes,
     get_primary_attributes,
-    sort_display_attributes,
 )
 from .component.pc.nick import build_card_by_mode
 from .component.pc.names import USAGE as NAME_USAGE, parse_name_request, generate_faker_names, generate_llm_names
@@ -1520,9 +1521,7 @@ class DicePlugin(Star):
             charmod.sync_derived_attributes(chara_data, rule_system=rule_system)
             chara_attrs = chara_data.get("attributes", {})
 
-            output_list = []
-            for display_name, _original_attr, value in sort_display_attributes(get_primary_attributes(chara_attrs)):
-                output_list.append(f"{display_name}: {format_attribute_display_value(value)}")
+            output_list = format_sorted_attribute_lines(get_primary_attributes(chara_attrs))
 
             output_list.extend(self._coc_state_lines(chara_attrs))
 
@@ -1534,24 +1533,22 @@ class DicePlugin(Star):
         # 场景 B: 尝试转为数字 ( .st show 30 ) 
         if len(valid_words) == 1 and valid_words[0].isdigit():
             threshold = int(valid_words[0])
-            output_parts = []
-            for display_name, _attr, value in sort_display_attributes(get_primary_attributes(chara_attrs)):
-                if not isinstance(value, (int, float)) or isinstance(value, bool):
-                    continue
-                if value <= threshold:
-                    continue
-                output_parts.append(
-                    f"· {display_name}: {format_attribute_display_value(value)}"
-                )
-            
-            if not output_parts:
+            above_threshold = {
+                display_name: pair
+                for display_name, pair in get_primary_attributes(chara_attrs).items()
+                if str(display_name).strip() not in COC_TAIL_DISPLAY_ORDER
+                and isinstance(pair[1], (int, float))
+                and not isinstance(pair[1], bool)
+                and pair[1] > threshold
+            }
+            if not above_threshold:
                 yield event.plain_result(get_output("pc.show.none_above", num=threshold))
-            else:
-                header = get_output("pc.show.above_threshold_header", num=threshold)
-                response = header + "\n" + "\n".join(output_parts)
-                if target_user_id != str(event.get_sender_id()):
-                    response = get_output("pc.show.named_header", name=chara_data["name"], content=response)
-                yield event.plain_result(response)
+                return
+
+            response = format_threshold_attributes(chara_attrs, threshold)
+            if target_user_id != str(event.get_sender_id()):
+                response = get_output("pc.show.named_header", name=chara_data["name"], content=response)
+            yield event.plain_result(response)
             return
 
         # 场景 C: 按属性名处理 ( .st show 力量 敏捷 )

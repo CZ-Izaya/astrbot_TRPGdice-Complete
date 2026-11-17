@@ -25,6 +25,9 @@ COC_TAIL_DISPLAY_ORDER = (
     "安抚本章已用",
 )
 
+# 数值属性与说明性信息之间的分隔线
+COC_TAIL_SEPARATOR = "——————"
+
 
 def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -82,12 +85,31 @@ def get_primary_attributes(attributes: dict) -> dict:
     return primary_attributes
 
 
+def format_sorted_attribute_lines(primary_attributes: dict, bullet: str = "") -> list:
+    """
+    把属性渲染成文本行：数值部分从大到小，说明性信息统一排在最后，
+    两者之间插一条分隔线（某一侧为空时不插线），并顺带按显示名去重。
+    """
+    lines = []
+    seen = set()
+    tail_started = False
+    for display_name, _attr, value in sort_display_attributes(primary_attributes):
+        name = str(display_name).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if name in COC_TAIL_DISPLAY_ORDER and not tail_started:
+            tail_started = True
+            if lines:
+                lines.append(COC_TAIL_SEPARATOR)
+        lines.append(f"{bullet}{name}: {format_attribute_display_value(value)}")
+    return lines
+
+
 def format_all_attributes(chara_data: dict) -> str:
-    output_list = []
-    for display_name, _original_attr, value in sort_display_attributes(
+    output_list = format_sorted_attribute_lines(
         get_primary_attributes(chara_data.get("attributes", {}))
-    ):
-        output_list.append(f"{display_name}: {format_attribute_display_value(value)}")
+    )
     return get_output(
         "pc.show.all",
         name=chara_data["name"],
@@ -96,13 +118,15 @@ def format_all_attributes(chara_data: dict) -> str:
 
 
 def format_threshold_attributes(attributes: dict, threshold: int, header_prefix: str = "") -> str:
-    output_parts = []
-    for display_name, _attr, value in sort_display_attributes(get_primary_attributes(attributes)):
-        if not _is_number(value):
-            continue
-        if value <= threshold:
-            continue
-        output_parts.append(f"· {display_name}: {format_attribute_display_value(value)}")
+    """筛选数值 > threshold 的属性；上限／阈值／状态等说明性条目不参与筛选。"""
+    above_threshold = {
+        display_name: pair
+        for display_name, pair in get_primary_attributes(attributes).items()
+        if str(display_name).strip() not in COC_TAIL_DISPLAY_ORDER
+        and _is_number(pair[1])
+        and pair[1] > threshold
+    }
+    output_parts = format_sorted_attribute_lines(above_threshold, bullet="· ")
 
     if not output_parts:
         return get_output("pc.show.none_above", num=threshold)
