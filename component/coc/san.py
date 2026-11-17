@@ -7,6 +7,16 @@ from ..common.output import get_output
 
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# ===== 修订版规则常量（改规则只改这里）=====
+# 单次理智损失达到该值触发惊骇检定（INT）。
+SHOCK_TRIGGER_LOSS = 5
+# 已异变（changed）的角色因「异变期间更难陷入惊骇」，触发阈值翻倍。
+SHOCK_TRIGGER_LOSS_CHANGED = 10
+# 安抚成功恢复的理智值。
+SOOTHE_SAN_GAIN = 2
+# 安抚大失败的理智损失骰面数：p.23 技能条目写 1D4，p.93 写 1D6，KP 裁定取 1D4。
+SOOTHE_FUMBLE_SAN_LOSS_DIE = 4
+
 # 恐惧
 with open(PLUGIN_DIR + "/../data/phobias.json", "r", encoding="utf-8") as f:
     phobias = json.load(f)["phobias"]

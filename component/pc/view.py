@@ -3,12 +3,17 @@ from typing import Iterable, List
 
 from ..common.output import get_output
 from .attributes import SYNONYMS, find_attribute_key
+from .store import is_hidden_coc_skill
 
 
 def get_primary_attributes(attributes: dict) -> dict:
     primary_attributes = {}
     for attr, value in attributes.items():
+        if is_hidden_coc_skill(attr):
+            continue
         primary_name = SYNONYMS.SYNONYM_MAP.get(attr, attr)
+        if is_hidden_coc_skill(primary_name):
+            continue
         if primary_name not in primary_attributes:
             primary_attributes[primary_name] = (attr, value)
         else:
@@ -32,6 +37,8 @@ def format_all_attributes(chara_data: dict) -> str:
 def format_threshold_attributes(attributes: dict, threshold: int, header_prefix: str = "") -> str:
     output_parts = []
     for attr, value in attributes.items():
+        if is_hidden_coc_skill(attr):
+            continue
         try:
             if value > threshold:
                 output_parts.append(f"路 {attr}: {value}")
@@ -51,6 +58,9 @@ def format_named_attributes(chara_data: dict, keys: Iterable[str], header_prefix
     not_found_attrs: List[str] = []
 
     for key in keys:
+        if is_hidden_coc_skill(key):
+            not_found_attrs.append(key)
+            continue
         resolved_key = find_attribute_key(attributes, key)
         if resolved_key is not None:
             found_attrs.append(get_output("pc.show.attr", attr=key, value=attributes[resolved_key]))

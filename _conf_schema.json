@@ -170,6 +170,18 @@
     "default": 120,
     "hint": "发送 .挂团 后等待下一条公告内容的秒数，超时后静默放弃。"
   },
+  "san_auto_int_check": {
+    "type": "bool",
+    "description": "自动掷惊骇 INT 检定",
+    "default": true,
+    "hint": "理智单次损失 ≥5（已异变时 ≥10）时自动掷 INT 判定是否惊骇。关闭后只提示需要掷 INT，由 kp 自己掷。"
+  },
+  "admin_ids": {
+    "type": "string",
+    "description": "管理命令管理员 ID",
+    "default": "",
+    "hint": "用于 .sc reset 等管理命令，填写 QQ 号，多个用逗号分隔。留空则读取 AstrBot 全局配置的 admins_id；两边都为空时任何人都会被拒绝。"
+  },
   "name_backend": {
     "type": "string",
     "description": "取名方式",

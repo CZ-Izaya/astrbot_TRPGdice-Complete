@@ -422,6 +422,68 @@ def roll_attribute(roll_times, skill_name, skill_value, group_id, name):
         
     return "".join(results_list) # 返回 "head\ndetail\ndetail..."
 
+def roll_attribute_detail(roll_times, skill_name, skill_value, group_id, name):
+    """
+    与 roll_attribute 完全一致，但同时返回最后一次判定的结构化结果。
+    返回 (显示文本, 结构化结果)；结构化结果为 None 表示数值无效。
+    结构化结果: {"roll": 骰值, "value": 技能值, "result": 结果文本, "rank": 等级}
+    等级（get_success_rank）：5 大成功 / 4 极难 / 3 困难 / 2 成功 / 1 失败 / 0 大失败
+    """
+    try:
+        roll_times = int(roll_times)
+        skill_value = int(skill_value)
+    except (ValueError, TypeError):
+        return get_output("skill_check.error.normal", skill_name=skill_name), None
+
+    head_str = get_output(
+        "skill_check.normal.head",
+        skill_name=skill_name,
+        name=name,
+        skill_value=skill_value,
+    )
+
+    results_list = [head_str]
+    outcome = None
+
+    for _ in range(roll_times):
+        tens_digit = random.randint(0, 9)
+        ones_digit = random.randint(0, 9)
+        roll_result = 100 if (tens_digit == 0 and ones_digit == 0) else (tens_digit * 10 + ones_digit)
+
+        result = get_roll_result(roll_result, skill_value, str(group_id))
+
+        detail_str = get_output(
+            "skill_check.normal.detail",
+            roll_result=roll_result,
+            skill_value=skill_value,
+            result=result
+        )
+        results_list.append(detail_str)
+        outcome = {
+            "roll": roll_result,
+            "value": skill_value,
+            "result": result,
+            "rank": get_success_rank(roll_result, skill_value, str(group_id)),
+        }
+
+    return "".join(results_list), outcome
+
+
+def roll_percentile_against(target_value, group_id, name=None, skill_name=None):
+    """
+    对目标值做一次 1D100 检定（惊骇的 INT 检定等），返回 (骰值, 结果文本, 等级)。
+    """
+    tens_digit = random.randint(0, 9)
+    ones_digit = random.randint(0, 9)
+    roll_result = 100 if (tens_digit == 0 and ones_digit == 0) else (tens_digit * 10 + ones_digit)
+    value = int(target_value)
+    return (
+        roll_result,
+        get_roll_result(roll_result, value, str(group_id)),
+        get_success_rank(roll_result, value, str(group_id)),
+    )
+
+
 def roll_attribute_penalty(roll_times, dice_count, skill_name, skill_value, group_id, name):
     """
     技能判定（惩罚骰）(支持多次, 适配 head/detail)

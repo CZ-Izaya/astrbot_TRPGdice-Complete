@@ -251,6 +251,99 @@ class DicePlugin(Star):
             text = text.split('@')[0]
         return text.strip()
 
+    def _coc_state_lines(self, attributes: dict) -> list:
+        """人物卡末尾的状态行：异变阈值、本章累计损失、当前精神状态。"""
+        if not isinstance(attributes, dict):
+            return []
+        threshold = attributes.get("changed_threshold")
+        if not isinstance(threshold, int):
+            threshold = charmod.derive_changed_threshold(attributes)
+        try:
+            total = int(attributes.get("san_loss_chapter", 0) or 0)
+        except (TypeError, ValueError):
+            total = 0
+
+        lines = [
+            get_output("pc.show.changed_threshold", threshold=threshold),
+            get_output("pc.show.san_loss_chapter", loss=total),
+        ]
+        states = []
+        if attributes.get("lost"):
+            states.append(get_output("pc.show.state_lost"))
+        if attributes.get("shock_active"):
+            states.append(get_output("pc.show.state_shock"))
+        if attributes.get("changed"):
+            states.append(get_output("pc.show.state_changed"))
+        elif attributes.get("aftershock"):
+            states.append(get_output("pc.show.state_aftershock"))
+        if states:
+            lines.append(get_output("pc.show.state_line", states="、".join(states)))
+        return lines
+
+    def _skill_name_notice(self, raw_name: str):
+        """被规则淘汰的技能名（旧社交技能、裸宗教）→ 返回提示文案，否则 None。"""
+        name = str(raw_name or "").strip()
+        if not name:
+            return None
+        name = name.split("/")[0]
+        name = re.sub(r"\s*a\d+$", "", name, flags=re.IGNORECASE)
+        if charmod.is_merged_social_skill(name):
+            return get_output("skill_check.social_merged")
+        if charmod.is_bare_religion_skill(name):
+            return get_output("skill_check.religion_specialty")
+        return None
+
+    def _parse_admin_ids(self, raw) -> set:
+        ids = set()
+        if isinstance(raw, str):
+            raw = re.split(r"[,，\s]+", raw)
+        if isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                text = str(item or "").strip()
+                if text:
+                    ids.add(text)
+        return ids
+
+    def _admin_ids(self) -> set:
+        """管理员 ID：优先插件配置 admin_ids，其次 AstrBot 全局配置 admins_id。"""
+        ids = self._parse_admin_ids(self.config.get("admin_ids"))
+        if ids:
+            return ids
+        global_config = {}
+        try:
+            getter = getattr(self.context, "get_config", None)
+            if callable(getter):
+                global_config = getter() or {}
+        except Exception as exc:
+            logger.warning(f"读取 AstrBot 全局配置失败，管理员判定不可用: {exc}")
+            global_config = {}
+        if isinstance(global_config, dict):
+            for key in ("admins_id", "admins"):
+                found = self._parse_admin_ids(global_config.get(key))
+                if found:
+                    return found
+        return set()
+
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """仅用管理员身份判定，不用群主/群管理代替。"""
+        try:
+            return str(event.get_sender_id()) in self._admin_ids()
+        except Exception:
+            return False
+
+    def _san_auto_int_check(self) -> bool:
+        value = self.config.get("san_auto_int_check")
+        if value is None:
+            san_config = self.config.get("san")
+            if isinstance(san_config, dict):
+                value = san_config.get("auto_int_check")
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0", "no", "off", "none", ""}
+        return bool(value)
+
+
     def _settings_path(self, kind: str, key: str) -> str:
         folder = os.path.join(SETTINGS_DIR, kind)
         os.makedirs(folder, exist_ok=True)
@@ -1162,9 +1255,18 @@ class DicePlugin(Star):
             yield event.plain_result(get_output("pc.update.error_format"))
             return
 
+        # 旧社交技能（取悦/话术/恐吓）与裸宗教一律拒绝写入
+        for entry_attribute, _, _ in entries:
+            notice = self._skill_name_notice(entry_attribute)
+            if notice:
+                yield event.plain_result(notice)
+                return
+
         if len(entries) > 1:
             for attribute, _, value in entries:
                 set_attribute_value(chara_data["attributes"], attribute, int(value))
+            if any(charmod.is_soothe_skill(attribute) for attribute, _, _ in entries):
+                chara_data["attributes"]["soothe_manual"] = True
 
             derived_tips = charmod.sync_derived_attributes(chara_data, rule_system=rule_system)
             charmod.save_character(group_id, user_id, chara_id, chara_data, rule_system=rule_system)
@@ -1216,6 +1318,9 @@ class DicePlugin(Star):
 
         new_val_final = max(0, new_value)
         set_attribute_value(chara_data["attributes"], attribute, new_val_final)
+        if charmod.is_soothe_skill(attribute):
+            # 手动加点后，派生同步不再覆盖安抚值
+            chara_data["attributes"]["soothe_manual"] = True
 
         derived_tips = charmod.sync_derived_attributes(chara_data, rule_system=rule_system)
         charmod.save_character(group_id, user_id, chara_id, chara_data, rule_system=rule_system)
@@ -1360,10 +1465,17 @@ class DicePlugin(Star):
 
         # 场景 A: 如果没有有效参数 ( .st show ) -> 显示 *PRIMARY* 属性
         if not valid_words:
+            # 先补齐派生值（安抚、异变阈值等），但不写盘
+            charmod.sync_derived_attributes(chara_data, rule_system=rule_system)
+            chara_attrs = chara_data.get("attributes", {})
             primary_attributes = {} 
             
             for attr, value in chara_attrs.items():
+                if charmod.is_hidden_coc_skill(attr):
+                    continue
                 primary_name = SYNONYMS.SYNONYM_MAP.get(attr, attr)
+                if charmod.is_hidden_coc_skill(primary_name):
+                    continue
                 if primary_name not in primary_attributes:
                     primary_attributes[primary_name] = (attr, value)
                 else:
@@ -1374,7 +1486,9 @@ class DicePlugin(Star):
             output_list = []
             for primary_name, (original_attr, value) in sorted(primary_attributes.items()):
                 output_list.append(f"{primary_name}: {value}")
-                
+
+            output_list.extend(self._coc_state_lines(chara_attrs))
+
             attributes_str = "\n".join(output_list)
             
             yield event.plain_result(get_output("pc.show.all", name=chara_data['name'], attributes=attributes_str))
@@ -1385,6 +1499,8 @@ class DicePlugin(Star):
             threshold = int(valid_words[0])
             output_parts = []
             for attr, value in chara_attrs.items():
+                if charmod.is_hidden_coc_skill(attr):
+                    continue
                 if value > threshold:
                     output_parts.append(f"· {attr}: {value}")
             
@@ -1403,6 +1519,9 @@ class DicePlugin(Star):
         not_found_attrs = []
         
         for key in valid_words:
+            if charmod.is_hidden_coc_skill(key):
+                not_found_attrs.append(key)
+                continue
             resolved_key = find_attribute_key(chara_attrs, key)
             if resolved_key is not None:
                 val = chara_attrs[resolved_key]
@@ -2581,20 +2700,25 @@ class DicePlugin(Star):
 
 
     # ========================================================= #
-    # san check
+    # san check / 惊骇 / 安抚
     # @filter.command("sc")
     async def pc_san_check(self, event: AstrMessageEvent, loss_formula: str, target_user_id: str = None):
-        """理智检定"""
+        """理智检定（含惊骇、异变、迷失判定）"""
         rule_system = self._get_rule_system(self._group_id(event))
         if rule_system != "coc":
             yield event.plain_result("此操作目前仅支持 CoC 人物卡。")
             return
+        if str(loss_formula or "").strip().lower() in {"reset", "清零", "归零"}:
+            async for result in self.pc_san_reset(event, target_user_id):
+                yield result
+            return
+
         user_id = target_user_id or event.get_sender_id()
         operator_user_id = str(event.get_sender_id())
         group_id = event.get_group_id()
         chara_data = charmod.get_current_character(group_id, user_id, rule_system=rule_system)
         client = event.bot
-        
+
         if not chara_data:
             if str(user_id) == operator_user_id:
                 yield event.plain_result(get_output("pc.show.no_active"))
@@ -2602,60 +2726,15 @@ class DicePlugin(Star):
                 yield event.plain_result(get_output("pc.show.target_no_active"))
             return
 
-        roll_result, san_value, result_msg, loss, new_san, expr = sanity.san_check(chara_data, loss_formula)
+        attrs = chara_data.setdefault("attributes", {})
+        charmod.ensure_state_fields(attrs)
 
-        # 更新人物卡
-        chara_data["attributes"]["san"] = new_san
+        text = self._apply_san_check(chara_data, loss_formula, str(group_id))
+
         charmod.save_character(group_id, user_id, chara_data["id"], chara_data, rule_system=rule_system)
-        
+
         if event.get_platform_name() == "aiocqhttp":
             await self._update_user_nickname_card(client, group_id, user_id)
-
-        if new_san == 0 :
-            text = get_output(
-                    "san.check_result.zero",
-                    name=chara_data["name"],
-                    roll_result=roll_result,
-                    san_value=san_value,
-                    result_msg=result_msg,
-                    loss=loss,
-                    new_san=new_san,
-                    expr = expr
-                )
-
-        elif loss == 0 :
-            text = get_output(
-                "san.check_result.no_loss",
-                name=chara_data["name"],
-                roll_result=roll_result,
-                san_value=san_value,
-                result_msg=result_msg,
-                loss=loss,
-                new_san=new_san,
-                expr = expr
-            )
-        elif loss < 5 :
-            text = get_output(
-                "san.check_result.loss",
-                name=chara_data["name"],
-                roll_result=roll_result,
-                san_value=san_value,
-                result_msg=result_msg,
-                loss=loss,
-                new_san=new_san,
-                expr = expr
-            )
-        else :
-            text = get_output(
-                "san.check_result.great_loss",
-                name=chara_data["name"],
-                roll_result=roll_result,
-                san_value=san_value,
-                result_msg=result_msg,
-                loss=loss,
-                new_san=new_san,
-                expr = expr
-            )
 
         payloads = {
             "group_id": group_id,
@@ -2665,24 +2744,300 @@ class DicePlugin(Star):
                 {"type": "text", "data": {"text": "\n" + text}}
             ]
         }
-        
+
         await self.save_log(group_id = event.get_group_id(), content = text, event=event)
-        
+
         await client.api.call_action("send_group_msg", **payloads)
 
 
+    def _apply_san_check(self, chara_data: dict, loss_formula: str, group_id) -> str:
+        """
+        执行一次理智检定：扣 SAN、累加本章损失、惊骇 INT 检定、异变与迷失判定。
+        返回给玩家看的文本；人物卡对象已在内存中改好，调用方负责写盘。
+        """
+        attrs = chara_data.setdefault("attributes", {})
+        charmod.ensure_state_fields(attrs)
+
+        roll_result, san_value, result_msg, loss, new_san, expr = sanity.san_check(chara_data, loss_formula)
+
+        in_shock = bool(attrs.get("shock_active"))
+        actual_loss = 0 if in_shock else loss
+        notes = []
+
+        if in_shock:
+            # 处于惊骇中不再损失理智；掷骰照常显示，但损失按 0 结算
+            new_san = san_value
+            attrs["san"] = san_value
+        else:
+            attrs["san"] = new_san
+            if actual_loss:
+                attrs["san_loss_chapter"] = int(attrs.get("san_loss_chapter", 0) or 0) + actual_loss
+
+        if new_san == 0:
+            attrs["lost"] = True
+            text = get_output(
+                "san.check_result.zero",
+                name=chara_data["name"],
+                roll_result=roll_result,
+                san_value=san_value,
+                result_msg=result_msg,
+                loss=actual_loss,
+                new_san=new_san,
+                expr=expr,
+            )
+        elif actual_loss == 0:
+            text = get_output(
+                "san.check_result.no_loss",
+                name=chara_data["name"],
+                roll_result=roll_result,
+                san_value=san_value,
+                result_msg=result_msg,
+                loss=actual_loss,
+                new_san=new_san,
+                expr=expr,
+            )
+        elif actual_loss < sanity.SHOCK_TRIGGER_LOSS:
+            text = get_output(
+                "san.check_result.loss",
+                name=chara_data["name"],
+                roll_result=roll_result,
+                san_value=san_value,
+                result_msg=result_msg,
+                loss=actual_loss,
+                new_san=new_san,
+                expr=expr,
+            )
+        else:
+            text = get_output(
+                "san.check_result.great_loss",
+                name=chara_data["name"],
+                roll_result=roll_result,
+                san_value=san_value,
+                result_msg=result_msg,
+                loss=actual_loss,
+                new_san=new_san,
+                expr=expr,
+            )
+
+        # ---- 惊骇判定 / 迷失 ----
+        if new_san == 0:
+            notes.append(get_output("shock.lost"))
+        elif in_shock:
+            notes.append(get_output("shock.no_loss_while_shock"))
+        else:
+            threshold = (sanity.SHOCK_TRIGGER_LOSS_CHANGED
+                         if attrs.get("changed") else sanity.SHOCK_TRIGGER_LOSS)
+            if actual_loss >= threshold:
+                if self._san_auto_int_check():
+                    int_value = charmod.get_attribute_number(
+                        attrs, "int", "INT", "智力", "灵感", default=None
+                    )
+                    if int_value is None:
+                        notes.append(get_output("shock.int.no_value"))
+                    else:
+                        int_roll, int_result, int_rank = dice_mod.roll_percentile_against(
+                            int_value, str(group_id)
+                        )
+                        notes.append(get_output(
+                            "shock.int.check", roll=int_roll, value=int_value, result=int_result
+                        ))
+                        if int_rank >= 2:
+                            attrs["shock_active"] = True
+                            attrs["aftershock"] = True
+                            notes.append(get_output("shock.int.success"))
+                            notes.append(get_output("shock.reactions"))
+                            notes.append(get_output(
+                                "shock.duration", rounds=random.randint(1, 10)
+                            ))
+                            notes.append(get_output("shock.aftershock"))
+                        else:
+                            notes.append(get_output("shock.int.failure"))
+                else:
+                    notes.append(get_output("shock.int.manual", threshold=threshold))
+
+        # ---- 异变判定（同一章只提示一次）----
+        if not attrs.get("lost") and charmod.check_changed_threshold(attrs):
+            notes.append(get_output("shock.changed", threshold=attrs.get("changed_threshold")))
+
+        if notes:
+            text = text + "\n" + "\n".join(notes)
+        return text
+
+
+    async def pc_san_reset(self, event: AstrMessageEvent, target_user_id: str = None):
+        """本章状态清零（仅 AstrBot 管理员）。"""
+        rule_system = self._get_rule_system(self._group_id(event))
+        if rule_system != "coc":
+            yield event.plain_result("此操作目前仅支持 CoC 人物卡。")
+            return
+        if not self._is_admin(event):
+            yield event.plain_result(get_output("san.reset.denied"))
+            return
+
+        operator_user_id = str(event.get_sender_id())
+        user_id = target_user_id or operator_user_id
+        group_id = event.get_group_id()
+        chara_data = charmod.get_current_character(group_id, user_id, rule_system=rule_system)
+
+        if not chara_data:
+            if str(user_id) == operator_user_id:
+                yield event.plain_result(get_output("pc.show.no_active"))
+            else:
+                yield event.plain_result(get_output("pc.show.target_no_active"))
+            return
+
+        attrs = chara_data.setdefault("attributes", {})
+        charmod.ensure_state_fields(attrs)
+        # 只清本章状态，不动当前 SAN、理智上限、神话值、技能与背景
+        attrs["san_loss_chapter"] = 0
+        attrs["changed"] = False
+        attrs["shock_active"] = False
+        attrs["aftershock"] = False
+        attrs["soothe_used_chapter"] = False
+        attrs["lost"] = False
+        charmod.save_character(group_id, user_id, chara_data["id"], chara_data, rule_system=rule_system)
+
+        if event.get_platform_name() == "aiocqhttp":
+            await self._update_user_nickname_card(event.bot, group_id, user_id)
+
+        text = get_output("san.reset.success", name=chara_data.get("name", user_id))
+        await self.save_log(group_id=group_id, content=text, event=event)
+        yield event.plain_result(text)
+
+
+    async def pc_soothe_check(self, event: AstrMessageEvent, skill_name: str = "", skill_value: str = None,
+                              roll_times=1, target_user_id: str = None):
+        """安抚：只能对他人使用，成功恢复 2 点理智并结束惊骇。"""
+        rule_system = self._get_rule_system(self._group_id(event))
+        if rule_system != "coc":
+            yield event.plain_result("此操作目前仅支持 CoC 人物卡。")
+            return
+
+        group_id = event.get_group_id()
+        operator_user_id = str(event.get_sender_id())
+        target_id = str(target_user_id) if target_user_id else ""
+        at_ids = [uid for uid in self._get_at_user_ids(event) if uid]
+
+        # 安抚不能用于自己：没有 @ 或 @ 的是自己，一律不掷骰
+        if not at_ids:
+            yield event.plain_result(get_output("soothe.need_target"))
+            return
+        if not target_id:
+            target_id = at_ids[0]
+        if target_id == operator_user_id:
+            yield event.plain_result(get_output("soothe.need_target"))
+            return
+
+        target_data = charmod.get_current_character(group_id, target_id, rule_system=rule_system)
+        if not target_data:
+            yield event.plain_result(get_output("pc.show.target_no_active"))
+            return
+
+        try:
+            operator_name = await get_sender_nickname(event.bot, group_id, operator_user_id)
+        except Exception:
+            operator_name = ""
+        if not operator_name:
+            operator_name = event.get_sender_name() or operator_user_id
+        target_name = target_data.get("name") or target_id
+        label = get_output("soothe.proxy_name", name=target_name, operator=operator_name)
+
+        check_name, check_value = self._resolve_skill_check(
+            group_id, operator_user_id, skill_name, skill_value
+        )
+        message, outcome = dice_mod.roll_attribute_detail(
+            roll_times, check_name, check_value, str(group_id), label
+        )
+        if outcome is None:
+            yield event.plain_result(message)
+            return
+
+        attrs = target_data.setdefault("attributes", {})
+        charmod.ensure_state_fields(attrs)
+        san_before = charmod.get_attribute_number(attrs, "san", "SAN", "理智", "理智值", default=0) or 0
+        max_san = charmod.get_attribute_number(attrs, "max_san", "理智上限", default=None)
+        if max_san is None:
+            cm = charmod.get_attribute_number(attrs, "cm", "克苏鲁神话", "克苏鲁", default=0) or 0
+            max_san = 99 - cm
+
+        notes = []
+        rank = outcome["rank"]
+
+        if rank >= 2:
+            # 成功（含困难、极难、大成功）：回 SAN，且不超过理智上限
+            if attrs.get("soothe_used_chapter"):
+                notes.append(get_output("soothe.already"))
+            else:
+                gain = min(sanity.SOOTHE_SAN_GAIN, max(0, max_san - san_before))
+                if gain > 0:
+                    attrs["san"] = san_before + gain
+                    attrs["soothe_used_chapter"] = True
+                    notes.append(get_output(
+                        "soothe.success", old=san_before, new=san_before + gain, max_san=max_san
+                    ))
+                else:
+                    notes.append(get_output("soothe.capped", san=san_before, max_san=max_san))
+            if attrs.get("shock_active"):
+                attrs["shock_active"] = False
+                notes.append(get_output("soothe.ends_shock"))
+            if attrs.get("changed"):
+                notes.append(get_output("soothe.reality_check"))
+        elif rank == 0:
+            # 大失败：目标损失 1D4 点理智，并计入本章累计损失
+            loss = random.randint(1, sanity.SOOTHE_FUMBLE_SAN_LOSS_DIE)
+            new_san = max(0, san_before - loss)
+            attrs["san"] = new_san
+            attrs["san_loss_chapter"] = int(attrs.get("san_loss_chapter", 0) or 0) + loss
+            notes.append(get_output("soothe.fumble", loss=loss, old=san_before, new=new_san))
+            if new_san == 0:
+                attrs["lost"] = True
+                notes.append(get_output("shock.lost"))
+            elif charmod.check_changed_threshold(attrs):
+                notes.append(get_output("shock.changed", threshold=attrs.get("changed_threshold")))
+        else:
+            # 失败：不恢复理智，也不打受益标记
+            notes.append(get_output("soothe.failed"))
+
+        charmod.save_character(group_id, target_id, target_data["id"], target_data, rule_system=rule_system)
+        if event.get_platform_name() == "aiocqhttp":
+            await self._update_user_nickname_card(event.bot, group_id, target_id)
+
+        text = message + ("\n" + "\n".join(notes) if notes else "")
+
+        payloads = {
+            "group_id": group_id,
+            "message": [
+                {"type": "reply", "data": {"id": event.message_obj.message_id}},
+                {"type": "at", "data": {"qq": operator_user_id}},
+                {"type": "text", "data": {"text": "\n" + text}}
+            ]
+        }
+
+        await self.save_log(group_id=group_id, content=text, event=event)
+        await event.bot.api.call_action("send_group_msg", **payloads)
+
+
+    async def pc_offstage_shock(self, event: AstrMessageEvent, args_str: str = ""):
+        """场外惊骇：只掷三个互不相同的 1-10 编号，表由 kp 自备。"""
+        if str(args_str or "").strip():
+            yield event.plain_result(get_output("shock.no_args"))
+            return
+        numbers = random.sample(range(1, 11), 3)
+        text = get_output("shock.pick", nums="、".join(str(number) for number in numbers))
+        await self.save_log(group_id=event.get_group_id(), content=text, event=event)
+        yield event.plain_result(text)
+
+
     async def pc_temporary_insanity(self, event: AstrMessageEvent):
-        """临时疯狂"""
-        result = sanity.get_temporary_insanity(sanity.phobias, sanity.manias)
-        text = get_output("san.temporary_insanity", result=result, name=event.get_sender_name())
+        """旧版临时疯狂：修订版已无此环节，只给弃用提示。"""
+        text = get_output("san.deprecated_insanity")
         await self.save_log(group_id = event.get_group_id(), content = text, event=event)
         yield event.plain_result(text)
 
 
     async def pc_long_term_insanity(self, event: AstrMessageEvent):
-        """长期疯狂"""
-        result = sanity.get_long_term_insanity(sanity.phobias, sanity.manias)
-        text = get_output("san.long_term_insanity", result=result, name=event.get_sender_name())
+        """旧版长期疯狂：修订版已无此环节，只给弃用提示。"""
+        text = get_output("san.deprecated_insanity")
         await self.save_log(group_id = event.get_group_id(), content = text, event=event)
         yield event.plain_result(text)
 
@@ -3194,6 +3549,13 @@ class DicePlugin(Star):
         dice_count = parsed.dice_count
         roll_times = parsed.roll_times
 
+        # 已被修订版淘汰的技能名（旧社交技能、裸宗教）不掷骰，只给提示
+        if cmd in {"ra", "rc", "rab", "rap", "rau", "rah", "rch", "rav", "rcv", "en"}:
+            notice = self._skill_name_notice(expr)
+            if notice:
+                yield event.plain_result(notice)
+                return
+
         if cmd == "r":
             await self.handle_roll_dice(event, expr, remark)
         elif cmd == "rd":
@@ -3213,9 +3575,17 @@ class DicePlugin(Star):
         elif cmd == "rau":
             await self.roll_attribute_until_success(event, expr, skill_value, target_user_id)
         elif cmd == "ra":
-            await self.roll_attribute(event, expr, skill_value, roll_times, target_user_id)
+            if charmod.is_soothe_skill(expr):
+                async for result in self.pc_soothe_check(event, expr, skill_value, roll_times, target_user_id):
+                    yield result
+            else:
+                await self.roll_attribute(event, expr, skill_value, roll_times, target_user_id)
         elif cmd == "rc":
-            await self.roll_attribute(event, expr, skill_value, roll_times, target_user_id)
+            if charmod.is_soothe_skill(expr):
+                async for result in self.pc_soothe_check(event, expr, skill_value, roll_times, target_user_id):
+                    yield result
+            else:
+                await self.roll_attribute(event, expr, skill_value, roll_times, target_user_id)
         elif cmd in {"rah", "rch"}:
             async for result in self.roll_attribute_hidden(event, expr, skill_value, roll_times, target_user_id):
                 yield result
@@ -3226,6 +3596,9 @@ class DicePlugin(Star):
             await self.pc_grow_up(event, expr, skill_value, target_user_id)
         elif cmd == "sc":
             async for result in self.pc_san_check(event, expr, target_user_id):
+                yield result
+        elif cmd == "shock":
+            async for result in self.pc_offstage_shock(event, expr):
                 yield result
         elif cmd == "li":
             async for result in self.pc_long_term_insanity(event):
@@ -3265,6 +3638,13 @@ class DicePlugin(Star):
         user_id = event.get_sender_id()
         name = await self._event_display_name(event, user_id)
 
+        # 已被修订版淘汰的技能名（旧社交技能、裸宗教）不掷骰，只给提示
+        if cmd in {"ra", "rc", "rab", "rap", "rau", "rah", "rch", "rav", "rcv", "en"}:
+            notice = self._skill_name_notice(expr)
+            if notice:
+                yield event.plain_result(notice)
+                return
+
         if cmd in {"r", "rd"}:
             result = dice_mod.handle_roll_dice(
                 expr if expr else f"1d{dice_mod.DEFAULT_DICE}",
@@ -3280,6 +3660,10 @@ class DicePlugin(Star):
         elif cmd == "rh":
             yield event.plain_result(dice_mod.roll_hidden(expr))
         elif cmd in {"ra", "rc"}:
+            if charmod.is_soothe_skill(expr):
+                # 安抚只能对他人使用，私聊里没有可指定的目标
+                yield event.plain_result(get_output("soothe.need_target"))
+                return
             skill_name, resolved_value = self._resolve_skill_check(context_id, user_id, expr, skill_value)
             result = dice_mod.roll_attribute(roll_times, skill_name, resolved_value, context_id, name)
             yield event.plain_result(result)
@@ -3305,34 +3689,20 @@ class DicePlugin(Star):
         elif cmd == "en":
             yield event.plain_result(charmod.grow_up(context_id, user_id, skill_name=expr, skill_value=skill_value, rule_system=rule_system))
         elif cmd == "sc":
+            if str(expr or "").strip().lower() in {"reset", "清零", "归零"}:
+                yield event.plain_result(get_output("san.reset.denied"))
+                return
             chara_data = charmod.get_current_character(context_id, user_id, rule_system=rule_system)
             if not chara_data:
                 yield event.plain_result(get_output("pc.show.no_active"))
                 return
 
-            roll_result, san_value, result_msg, loss, new_san, parsed_expr = sanity.san_check(chara_data, expr)
-            chara_data["attributes"]["san"] = new_san
+            text = self._apply_san_check(chara_data, expr, context_id)
             charmod.save_character(context_id, user_id, chara_data["id"], chara_data, rule_system=rule_system)
-
-            if new_san == 0:
-                output_key = "san.check_result.zero"
-            elif loss == 0:
-                output_key = "san.check_result.no_loss"
-            elif loss < 5:
-                output_key = "san.check_result.loss"
-            else:
-                output_key = "san.check_result.great_loss"
-
-            yield event.plain_result(get_output(
-                output_key,
-                name=chara_data["name"],
-                roll_result=roll_result,
-                san_value=san_value,
-                result_msg=result_msg,
-                loss=loss,
-                new_san=new_san,
-                expr=parsed_expr,
-            ))
+            yield event.plain_result(text)
+        elif cmd == "shock":
+            async for result in self.pc_offstage_shock(event, expr):
+                yield result
         elif cmd == "li":
             async for result in self.pc_long_term_insanity(event):
                 yield result

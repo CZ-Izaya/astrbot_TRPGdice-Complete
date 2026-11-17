@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import uuid
 import random
 import shutil
@@ -30,7 +31,6 @@ COC_DEFAULT_SKILLS = {
     "人类学": 1,
     "估价": 5,
     "考古学": 1,
-    "取悦": 15,
     "攀爬": 20,
     "计算机": 5,
     "信用": 0,
@@ -39,7 +39,6 @@ COC_DEFAULT_SKILLS = {
     "汽车驾驶": 20,
     "电气维修": 10,
     "电子学": 1,
-    "话术": 5,
     "斗殴": 25,
     "手枪": 20,
     "步枪": 25,
@@ -51,7 +50,6 @@ COC_DEFAULT_SKILLS = {
     "链锯": 10,
     "急救": 30,
     "历史": 5,
-    "恐吓": 15,
     "跳跃": 20,
     "母语": 0,
     "法律": 5,
@@ -123,7 +121,56 @@ COC_SPECIALIZED_DEFAULT_SKILLS = {
     "外语": 1,
     "其他语言": 1,
     "生存": 10,
+    "宗教": 10,   # 宗教只以专长形式存在（宗教（基督教）等），基础值 10
 }
+
+# 修订版把社交技能合并为唯一的「说服」：取悦／魅惑／话术／恐吓不再作为技能存在。
+COC_MERGED_SOCIAL_SKILLS = ("取悦", "魅惑", "话术", "恐吓")
+
+# 安抚是派生技能：基础值 = 外貌 ÷ 5（向下取整），可被 .st 手动加点覆盖。
+SOOTHE_SKILL_NAME = "安抚"
+
+# 宗教不接受裸技能名，必须带专长。
+RELIGION_SKILL_NAME = "宗教"
+
+# 旧卡里残留的这几项在展示与检定中一律忽略（D-1：不迁移、不合并取值）。
+COC_HIDDEN_SKILL_KEYS = set(COC_MERGED_SOCIAL_SKILLS)
+
+_DIFFICULTY_PREFIXES = ("困难", "困難", "极难", "極難")
+
+
+def _strip_skill_decorations(skill_name: str) -> str:
+    """去掉难度前缀与 ±N 修正，得到用于比对技能名的干净字符串。"""
+    name = (skill_name or "").strip()
+    for prefix in _DIFFICULTY_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix):].strip()
+            break
+    else:
+        if len(name) > 1 and name[0] in "heHE" and not name[1].isascii():
+            name = name[1:].strip()
+    return re.sub(r"[+-]\d+$", "", name).strip()
+
+
+def is_merged_social_skill(skill_name: str) -> bool:
+    """取悦／魅惑／话术／恐吓 → True（这三个技能已被「说服」取代）。"""
+    return _strip_skill_decorations(skill_name) in COC_MERGED_SOCIAL_SKILLS
+
+
+def is_soothe_skill(skill_name: str) -> bool:
+    return _strip_skill_decorations(skill_name) == SOOTHE_SKILL_NAME
+
+
+def is_bare_religion_skill(skill_name: str) -> bool:
+    """裸「宗教」→ True；带专长的「宗教（基督教）」不算裸技能。"""
+    return _strip_skill_decorations(skill_name) == RELIGION_SKILL_NAME
+
+
+def is_hidden_coc_skill(skill_name: str) -> bool:
+    """旧卡残留的社交技能键：展示与技能列表中都应忽略。"""
+    name = (skill_name or "").strip()
+    return name in COC_HIDDEN_SKILL_KEYS
+
 
 # NEW : BINDING
 
@@ -463,7 +510,86 @@ def sync_derived_attributes(chara_data: dict, rule_system="coc"):
         except :
             pass
 
+    # 3. 安抚: 外貌 ÷ 5（向下取整）。被 .st 手动加过点后不再覆盖。
+    val_app = attrs.get("app", attrs.get("外貌"))
+    if val_app is not None and not attrs.get("soothe_manual"):
+        try:
+            new_soothe = int(val_app) // 5
+        except (TypeError, ValueError):
+            new_soothe = None
+        if new_soothe is not None and attrs.get(SOOTHE_SKILL_NAME) != new_soothe:
+            attrs[SOOTHE_SKILL_NAME] = new_soothe
+            updates_made.append(f"{SOOTHE_SKILL_NAME}: {new_soothe}")
+
+    # 4. 异变阈值: 意志 ÷ 5（向下取整）
+    new_threshold = derive_changed_threshold(attrs)
+    if attrs.get("changed_threshold") != new_threshold:
+        attrs["changed_threshold"] = new_threshold
+        updates_made.append(f"异变阈值: {new_threshold}")
+
+    # 5. 本章状态字段补默认值（老人物卡没有这些键时按默认值读取）
+    ensure_state_fields(attrs)
+
     return updates_made # 返回修改了哪些项，方便输出提示
+
+
+def derive_changed_threshold(attributes: dict) -> int:
+    """异变阈值 = 意志 ÷ 5，向下取整。"""
+    val_pow = attributes.get("pow", attributes.get("意志", 0))
+    try:
+        return int(val_pow) // 5
+    except (TypeError, ValueError):
+        try:
+            return int(float(val_pow)) // 5
+        except (TypeError, ValueError):
+            return 0
+
+
+def ensure_state_fields(attributes: dict):
+    """补齐本章状态字段，并保证派生阈值存在（向后兼容老人物卡）。"""
+    if not isinstance(attributes, dict):
+        return
+    attributes.setdefault("san_loss_chapter", 0)
+    attributes.setdefault("changed", False)
+    attributes.setdefault("shock_active", False)
+    attributes.setdefault("aftershock", False)
+    attributes.setdefault("lost", False)
+    attributes.setdefault("soothe_manual", False)
+    attributes.setdefault("soothe_used_chapter", False)
+    if "changed_threshold" not in attributes:
+        attributes["changed_threshold"] = derive_changed_threshold(attributes)
+
+
+def get_attribute_number(attributes: dict, *names, default=None):
+    """按顺序取第一个可转为数字的属性值。"""
+    for name in names:
+        if name in attributes:
+            try:
+                return int(attributes[name])
+            except (TypeError, ValueError):
+                try:
+                    return int(float(attributes[name]))
+                except (TypeError, ValueError):
+                    continue
+    return default
+
+
+def check_changed_threshold(attributes: dict) -> bool:
+    """累计损失达到异变阈值时置 changed=True；返回本次是否刚刚触发（只提示一次）。"""
+    if not isinstance(attributes, dict) or attributes.get("changed"):
+        return False
+    threshold = attributes.get("changed_threshold")
+    if not isinstance(threshold, int):
+        threshold = derive_changed_threshold(attributes)
+        attributes["changed_threshold"] = threshold
+    try:
+        total = int(attributes.get("san_loss_chapter", 0) or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if threshold > 0 and total >= threshold:
+        attributes["changed"] = True
+        return True
+    return False
 
 ### OLD LOGIC
 
@@ -626,6 +752,13 @@ def get_coc_default_skill_value(skill_name: str, attributes: dict = None):
             return int(dex) // 2
         except (TypeError, ValueError):
             return 25
+
+    if canonical_name == SOOTHE_SKILL_NAME:
+        app = _get_attribute_value(attributes, "app", "APP", "外貌")
+        try:
+            return int(app) // 5
+        except (TypeError, ValueError):
+            return 10
 
     if canonical_name in COC_DEFAULT_SKILLS:
         return COC_DEFAULT_SKILLS[canonical_name]
