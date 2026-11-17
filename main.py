@@ -38,11 +38,19 @@ from .component.pc.view import (
     format_all_attributes,
     format_named_attributes,
     format_threshold_attributes,
+    get_primary_attributes,
 )
 from .component.pc.nick import build_card_by_mode
 from .component.pc.names import USAGE as NAME_USAGE, parse_name_request, generate_faker_names, generate_llm_names
 from .component.pc.template import get_coc_st_template
-from .component.pc.attributes import parse_st_expression, find_attribute_key, set_attribute_value
+from .component.pc.attributes import (
+    COC_STATE_FIELDS,
+    find_attribute_key,
+    format_attribute_display_value,
+    get_attribute_display_name,
+    parse_st_expression,
+    set_attribute_value,
+)
 from .component.spells import query_coc_spell
 
 logger_core = JSONLoggerCore()
@@ -252,21 +260,9 @@ class DicePlugin(Star):
         return text.strip()
 
     def _coc_state_lines(self, attributes: dict) -> list:
-        """人物卡末尾的状态行：异变阈值、本章累计损失、当前精神状态。"""
+        """人物卡末尾的状态行：当前精神状态（阈值与累计损失已在属性列表中显示）。"""
         if not isinstance(attributes, dict):
             return []
-        threshold = attributes.get("changed_threshold")
-        if not isinstance(threshold, int):
-            threshold = charmod.derive_changed_threshold(attributes)
-        try:
-            total = int(attributes.get("san_loss_chapter", 0) or 0)
-        except (TypeError, ValueError):
-            total = 0
-
-        lines = [
-            get_output("pc.show.changed_threshold", threshold=threshold),
-            get_output("pc.show.san_loss_chapter", loss=total),
-        ]
         states = []
         if attributes.get("lost"):
             states.append(get_output("pc.show.state_lost"))
@@ -276,9 +272,31 @@ class DicePlugin(Star):
             states.append(get_output("pc.show.state_changed"))
         elif attributes.get("aftershock"):
             states.append(get_output("pc.show.state_aftershock"))
-        if states:
-            lines.append(get_output("pc.show.state_line", states="、".join(states)))
-        return lines
+        if not states:
+            return []
+        return [get_output("pc.show.state_line", states="、".join(states))]
+
+    async def _actor_label(self, event: AstrMessageEvent, group_id, user_id) -> str:
+        """检定结果里显示的名字：优先人物卡名，未绑卡时退回群名片 / 昵称。"""
+        try:
+            data = charmod.get_current_character(
+                group_id, user_id, rule_system=self._get_rule_system(group_id)
+            )
+        except Exception:
+            data = None
+        if data:
+            name = str(data.get("name") or "").strip()
+            if name:
+                return name
+        try:
+            nickname = await get_sender_nickname(event.bot, group_id, user_id)
+        except Exception:
+            nickname = ""
+        if nickname:
+            return nickname
+        if str(user_id) == str(event.get_sender_id()):
+            return event.get_sender_name() or str(user_id)
+        return str(user_id)
 
     def _skill_name_notice(self, raw_name: str):
         """被规则淘汰的技能名（旧社交技能、裸宗教）→ 返回提示文案，否则 None。"""
@@ -1139,8 +1157,7 @@ class DicePlugin(Star):
         group_id = event.get_group_id()
         client = event.bot
         
-        ret = await get_sender_nickname(client, group_id, user_id)
-        ret = event.get_sender_name() if ret == "" else ret
+        ret = await self._actor_label(event, group_id, user_id)
 
         # 让 dice 模块处理表达式并返回由 get_output 格式化好的文本（或错误文本）
         result_text = dice_mod.handle_roll_dice(message if message else f"1d{dice_mod.DEFAULT_DICE}", name = ret, remark = remark)
@@ -1149,7 +1166,6 @@ class DicePlugin(Star):
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": message_id}},
-                {"type": "at", "data": {"qq": user_id}},
                 {"type": "text", "data": {"text": "\n" + result_text}}
             ]
         }
@@ -1178,8 +1194,7 @@ class DicePlugin(Star):
         group_id = event.get_group_id()
         client = event.bot
 
-        ret = await get_sender_nickname(client, group_id, user_id)
-        ret = event.get_sender_name() if ret == "" else ret
+        ret = await self._actor_label(event, group_id, user_id)
         text = get_output("dice.vampire.success", result=result_body, name = ret)
         
         message_id = event.message_obj.message_id
@@ -1187,7 +1202,6 @@ class DicePlugin(Star):
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": message_id}},
-                {"type": "at", "data": {"qq": user_id}},
                 {"type": "text", "data": {"text": "\n" + text}}
             ]
         }
@@ -1232,6 +1246,8 @@ class DicePlugin(Star):
         if not self._command_enabled(event):
             return
         if not attributes:
+            # 空参数不再静默：给一句用法提示
+            yield event.plain_result(get_output("pc.update.no_args"))
             return
 
         if attributes in COMMANDS :
@@ -1487,24 +1503,10 @@ class DicePlugin(Star):
             # 先补齐派生值（安抚、异变阈值等），但不写盘
             charmod.sync_derived_attributes(chara_data, rule_system=rule_system)
             chara_attrs = chara_data.get("attributes", {})
-            primary_attributes = {} 
-            
-            for attr, value in chara_attrs.items():
-                if charmod.is_hidden_coc_skill(attr):
-                    continue
-                primary_name = SYNONYMS.SYNONYM_MAP.get(attr, attr)
-                if charmod.is_hidden_coc_skill(primary_name):
-                    continue
-                if primary_name not in primary_attributes:
-                    primary_attributes[primary_name] = (attr, value)
-                else:
-                    current_stored_attr_name = primary_attributes[primary_name][0]
-                    if current_stored_attr_name != primary_name and attr == primary_name:
-                        primary_attributes[primary_name] = (attr, value)
 
             output_list = []
-            for primary_name, (original_attr, value) in sorted(primary_attributes.items()):
-                output_list.append(f"{primary_name}: {value}")
+            for display_name, (original_attr, value) in sorted(get_primary_attributes(chara_attrs).items()):
+                output_list.append(f"{display_name}: {format_attribute_display_value(value)}")
 
             output_list.extend(self._coc_state_lines(chara_attrs))
 
@@ -1517,11 +1519,15 @@ class DicePlugin(Star):
         if len(valid_words) == 1 and valid_words[0].isdigit():
             threshold = int(valid_words[0])
             output_parts = []
-            for attr, value in chara_attrs.items():
-                if charmod.is_hidden_coc_skill(attr):
+            for display_name, (_attr, value) in sorted(get_primary_attributes(chara_attrs).items()):
+                try:
+                    if value <= threshold:
+                        continue
+                except TypeError:
                     continue
-                if value > threshold:
-                    output_parts.append(f"· {attr}: {value}")
+                output_parts.append(
+                    f"· {display_name}: {format_attribute_display_value(value)}"
+                )
             
             if not output_parts:
                 yield event.plain_result(get_output("pc.show.none_above", num=threshold))
@@ -1544,7 +1550,11 @@ class DicePlugin(Star):
             resolved_key = find_attribute_key(chara_attrs, key)
             if resolved_key is not None:
                 val = chara_attrs[resolved_key]
-                found_attrs.append(get_output("pc.show.attr", attr=key, value=val))
+                found_attrs.append(get_output(
+                    "pc.show.attr",
+                    attr=get_attribute_display_name(resolved_key),
+                    value=format_attribute_display_value(val),
+                ))
             else:
                 # 二次防误伤：如果残留的名片名字带有空格（如 John Doe）被切碎了
                 # 只要这个碎词属于对方名字的一部分，我们就默默包容它，不报错
@@ -1697,8 +1707,7 @@ class DicePlugin(Star):
         user_id = event.get_sender_id()
         client = event.bot
         group_id = event.get_group_id()
-        ret = await get_sender_nickname(client, group_id, user_id)
-        ret = event.get_sender_name() if ret == "" else ret
+        ret = await self._actor_label(event, group_id, user_id)
         
         chara_id = charmod.get_current_character_id(group_id, user_id, rule_system=rule_system)
         
@@ -1785,9 +1794,11 @@ class DicePlugin(Star):
             return
 
         # --- 核心逻辑：直接拼接 ---
-        # 直接遍历字典，不跳过任何同义词
+        # 不跳过任何同义词；但内部状态字段不能导出（粘回去会被当成属性写入）
         export_parts = []
         for attr_name, value in chara_attrs.items():
+            if attr_name in COC_STATE_FIELDS:
+                continue
             export_parts.append(f"{attr_name}{value}")
 
         # 组合成长字符串
@@ -2481,13 +2492,11 @@ class DicePlugin(Star):
         client = event.bot
         
         # 获取目标的名字
-        ret = await get_sender_nickname(client, group_id, actual_user_id)
-        if ret == "":
-            ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
+        ret = await self._actor_label(event, group_id, actual_user_id)
             
         # 如果是代投，在名字上做个小标记
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
+            ret = get_output("skill_check.proxy_name", name=ret, operator=await self._actor_label(event, group_id, event.get_sender_id()))
 
         logger.info(ret)
         
@@ -2497,8 +2506,6 @@ class DicePlugin(Star):
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                # 依然 @ 触发指令的人，提醒他结果出来了
-                {"type": "at", "data": {"qq": event.get_sender_id()}}, 
                 {"type": "text", "data": {"text": "\n" + result_message}}
             ]
         }
@@ -2511,18 +2518,15 @@ class DicePlugin(Star):
         skill_name, skill_value = self._resolve_skill_check(group_id, actual_user_id, skill_name, skill_value)
 
         client = event.bot
-        ret = await get_sender_nickname(client, group_id, actual_user_id)
-        if ret == "":
-            ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
+        ret = await self._actor_label(event, group_id, actual_user_id)
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
+            ret = get_output("skill_check.proxy_name", name=ret, operator=await self._actor_label(event, group_id, event.get_sender_id()))
 
         result_message = dice_mod.roll_attribute_until_success(skill_name, skill_value, str(group_id), ret)
         payloads = {
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "at", "data": {"qq": event.get_sender_id()}},
                 {"type": "text", "data": {"text": "\n" + result_message}}
             ]
         }
@@ -2537,12 +2541,10 @@ class DicePlugin(Star):
         skill_name, skill_value = self._resolve_skill_check(group_id, actual_user_id, skill_name, skill_value)
 
         client = event.bot
-        ret = await get_sender_nickname(client, group_id, actual_user_id)
-        if ret == "":
-            ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
+        ret = await self._actor_label(event, group_id, actual_user_id)
             
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
+            ret = get_output("skill_check.proxy_name", name=ret, operator=await self._actor_label(event, group_id, event.get_sender_id()))
 
         result_message = dice_mod.roll_attribute_penalty(roll_times, dice_count, skill_name, skill_value, str(group_id), ret)
 
@@ -2550,7 +2552,6 @@ class DicePlugin(Star):
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "at", "data": {"qq": event.get_sender_id()}},
                 {"type": "text", "data": {"text": "\n" + result_message}}
             ]
         }
@@ -2566,12 +2567,10 @@ class DicePlugin(Star):
         skill_name, skill_value = self._resolve_skill_check(group_id, actual_user_id, skill_name, skill_value)
 
         client = event.bot
-        ret = await get_sender_nickname(client, group_id, actual_user_id)
-        if ret == "":
-            ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
+        ret = await self._actor_label(event, group_id, actual_user_id)
             
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
+            ret = get_output("skill_check.proxy_name", name=ret, operator=await self._actor_label(event, group_id, event.get_sender_id()))
 
         result_message = dice_mod.roll_attribute_bonus(roll_times, dice_count, skill_name, skill_value, str(group_id), ret)
 
@@ -2579,7 +2578,6 @@ class DicePlugin(Star):
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "at", "data": {"qq": event.get_sender_id()}},
                 {"type": "text", "data": {"text": "\n" + result_message}}
             ]
         }
@@ -2593,11 +2591,9 @@ class DicePlugin(Star):
         skill_name, skill_value = self._resolve_skill_check(group_id, actual_user_id, skill_name, skill_value)
 
         client = event.bot
-        ret = await get_sender_nickname(client, group_id, actual_user_id)
-        if ret == "":
-            ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
+        ret = await self._actor_label(event, group_id, actual_user_id)
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
+            ret = get_output("skill_check.proxy_name", name=ret, operator=await self._actor_label(event, group_id, event.get_sender_id()))
 
         result_message = dice_mod.roll_attribute(roll_times, skill_name, skill_value, str(group_id), ret)
         await self.save_log(group_id=group_id, content="[Hidden Skill Check]" + result_message, event=event)
@@ -2637,15 +2633,12 @@ class DicePlugin(Star):
 
         if spec.explicit_right:
             right_skill_name, right_value = self._resolve_skill_check(group_id, event.get_sender_id(), spec.skill_name, spec.right_value)
-            left_label = event.get_sender_name() or get_output("versus.label.left")
+            left_label = await self._actor_label(event, group_id, event.get_sender_id())
             right_label = get_output("versus.label.right")
         elif opponent_user_id:
             right_skill_name, right_value = self._resolve_skill_check(group_id, opponent_user_id, spec.skill_name, None)
-            left_label = event.get_sender_name() or str(event.get_sender_id())
-            try:
-                right_label = await get_sender_nickname(event.bot, group_id, opponent_user_id) or str(opponent_user_id)
-            except Exception:
-                right_label = str(opponent_user_id)
+            left_label = await self._actor_label(event, group_id, event.get_sender_id())
+            right_label = await self._actor_label(event, group_id, opponent_user_id)
         else:
             yield event.plain_result(get_output("versus.error.no_target"))
             return
@@ -2686,7 +2679,7 @@ class DicePlugin(Star):
 
         # 构造发送消息
 
-        user_name = event.get_sender_name()
+        user_name = await self._actor_label(event, group_id, user_id)
         client = event.bot  # 获取机器人 Client
         message_id = event.message_obj.message_id
 
@@ -2697,12 +2690,6 @@ class DicePlugin(Star):
                     "type": "reply",
                     "data": {
                         "id": message_id
-                    }
-                },
-                {
-                    "type": "at",
-                    "data": {
-                        "qq": user_id
                     }
                 },
                 {
@@ -2759,7 +2746,6 @@ class DicePlugin(Star):
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "at", "data": {"qq": user_id}},
                 {"type": "text", "data": {"text": "\n" + text}}
             ]
         }
@@ -2953,7 +2939,7 @@ class DicePlugin(Star):
             return
 
         try:
-            operator_name = await get_sender_nickname(event.bot, group_id, operator_user_id)
+            operator_name = await self._actor_label(event, group_id, operator_user_id)
         except Exception:
             operator_name = ""
         if not operator_name:
@@ -3027,7 +3013,6 @@ class DicePlugin(Star):
             "group_id": group_id,
             "message": [
                 {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "at", "data": {"qq": operator_user_id}},
                 {"type": "text", "data": {"text": "\n" + text}}
             ]
         }

@@ -104,6 +104,53 @@ class SYNONYMS:
         PROTECTED_ATTRIBUTES.update(group)
 
 BRACKETS = {"(": ")", "[": "]", "{": "}", "【": "】", "〔": "〕", "〈": "〉", "《": "》", "「": "」", "『": "』", "〖": "〗", "〘": "〙", "〚": "〛"}
+
+# 本章状态字段：属于状态而非属性，展示时单独处理，导出时跳过。
+COC_STATE_FIELDS = (
+    "san_loss_chapter",
+    "changed",
+    "changed_threshold",
+    "shock_active",
+    "aftershock",
+    "lost",
+    "soothe_manual",
+    "soothe_used_chapter",
+)
+
+# 属性 / 状态的对外中文名（只影响显示，存档键保持原样）
+COC_ATTRIBUTE_CN_NAMES = {
+    "hp": "体力",
+    "san": "理智",
+    "mp": "魔法",
+    "max_hp": "体力上限",
+    "max_san": "理智上限",
+    "luck": "幸运",
+    "changed_threshold": "异变阈值",
+    "san_loss_chapter": "本章累计损失",
+    "changed": "异变",
+    "shock_active": "惊骇中",
+    "aftershock": "余悸",
+    "lost": "迷失",
+    "soothe_manual": "安抚已手动加点",
+    "soothe_used_chapter": "安抚本章已用",
+}
+
+
+def get_attribute_display_name(attr_name) -> str:
+    """把英文键换成中文显示名；没有映射的原样返回。"""
+    name = "" if attr_name is None else str(attr_name)
+    return COC_ATTRIBUTE_CN_NAMES.get(name, name)
+
+
+def format_attribute_display_value(value) -> str:
+    """布尔值显示为 是 / 否，其余原样转成字符串。"""
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return str(value)
+
+
 WORD = r"[a-zA-Z\u3400-\u9fff/_]+"
 def bracket_pattern(content):
     return "(?:" + "|".join(

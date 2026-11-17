@@ -323,6 +323,7 @@ output:
       success: "已切换当前人物卡为：<{name}>。"
     update:
       no_active: "当前群组尚未绑定人物卡，请使用 .pc tag 绑定后再修改。"
+      no_args: "用法：.st 力量60 敏捷25 …（整串粘贴即可）；查看属性用 .st show。"
       error_format: "属性表达式格式错误，例如：力量+1、外貌80。"
       error_format_no_value: "请在加减号后填写数值。"
       success: "【{attr}】：{old} → {new}"
@@ -442,21 +443,21 @@ output:
       "10": "躁狂：调查员患上一种新的躁狂症（骰 1D100 或由 kp 选择）。"
     check_result:
       loss: |
-        <{name}> 的 SAN 检定：{roll_result}/{san_value}，{result_msg}
-        损失 {expr}，当前 SAN：{new_san}
+        <{name}> 的理智检定：{roll_result}/{san_value}，{result_msg}
+        损失 {expr}，当前理智：{new_san}
       no_loss: |
-        <{name}> 的 SAN 检定：{roll_result}/{san_value}，{result_msg}
-        损失 {expr}，SAN 保持不变。
+        <{name}> 的理智检定：{roll_result}/{san_value}，{result_msg}
+        损失 {expr}，理智保持不变。
       great_loss: |
-        <{name}> 的 SAN 检定：{roll_result}/{san_value}，{result_msg}
-        损失 {expr}，当前 SAN：{new_san}。
+        <{name}> 的理智检定：{roll_result}/{san_value}，{result_msg}
+        损失 {expr}，当前理智：{new_san}。
       zero: |
-        <{name}> 的 SAN 检定：{roll_result}/{san_value}，{result_msg}
-        损失 {expr}，SAN 已降至 0。
+        <{name}> 的理智检定：{roll_result}/{san_value}，{result_msg}
+        损失 {expr}，理智已降至 0。
     reset:
       denied: "该命令仅限 AstrBot 管理员使用。"
-      success: "已清零 <{name}> 的本章状态：本章累计损失、异变、惊骇、余悸、安抚受益标记（含迷失标记）。当前 SAN、理智上限与技能不变。"
-    deprecated_insanity: "旧版的「临时性／长期疯狂」表已停用。损失 ≥5 点时掷 INT 判定惊骇，用 .shock 查看场外惊骇编号。"
+      success: "已清零 <{name}> 的本章状态：本章累计损失、异变、惊骇、余悸、安抚受益标记（含迷失标记）。当前理智、理智上限与技能不变。"
+    deprecated_insanity: "旧版的「临时性／长期疯狂」表已停用。损失 ≥5 点时掷智力判定惊骇，用 .shock 查看场外惊骇编号。"
     # legacy：旧版症状表文案保留，避免其它引用处缺键；.ti/.li 已降级为弃用提示。
     temporary_insanity: |
       {name} 疯狂发作 - 临时症状：
@@ -470,15 +471,15 @@ output:
       kp 请在你当前使用的场外惊骇表（通用／丹海）中查找这三个编号，任选其一作为结果；也可无视随机，直接从表中另选。条目内容不在群内展示。
     no_args: "该命令不带参数，直接发送 .shock 获取三个随机编号。"
     int:
-      check: "→ 惊骇检定（INT {value}%）：{roll}/{value}，{result}"
+      check: "→ 惊骇检定（智力 {value}%）：{roll}/{value}，{result}"
       success: "智力检定成功：调查员理解了自己所见之事的全部意义，进入惊骇。"
       failure: "智力检定失败：大脑屏蔽了恐怖，未进入惊骇。"
-      manual: "本次损失 ≥{threshold} 点，需掷 INT 判定是否惊骇（自动检定已关闭）。"
-      no_value: "人物卡缺少智力值，无法自动进行惊骇检定，请 kp 手动掷 INT。"
+      manual: "本次损失 ≥{threshold} 点，需掷智力判定是否惊骇（自动检定已关闭）。"
+      no_value: "人物卡缺少智力值，无法自动进行惊骇检定，请 kp 手动掷智力。"
     reactions: |-
       从下列五种反应中选一种扮演：
       · 战斗：调查员以攻击性的方式回应，攻击惊骇的来源，无论那是人、怪物还是无生命物体。
-      · 逃跑：全身上下每一处都在告诉自己绠不能留在原地；他们很可能会攻击任何试图阻拦自己的人。
+      · 逃跑：全身上下每一处都在告诉自己绝不能留在原地；他们很可能会攻击任何试图阻拦自己的人。
       · 僵住：双脚仿佛化为石头，像雕像一样无法移动，眼睛一眨不眨；思绪或许飞速转动，却似乎与身体脱节。
       · 昏厥：惊骇压垮了调查员，心智和身体就此停止运作，令其瘫倒在地。
       · 讨好：拼命尝试博取惊骇来源的好感；可能表现为乞求饶命、试图安抚恐怖的来源、以顺从姿态蜷成一团，等等。
@@ -490,11 +491,11 @@ output:
   soothe:
     need_target: "安抚只能用于他人，请 @ 你要安抚的对象。"
     proxy_name: "{name} (由 <{operator}> 安抚)"
-    success: "SAN {old} → {new}（上限 {max_san}），本章已受益，本模组内不再恢复。"
+    success: "理智 {old} → {new}（上限 {max_san}），本章已受益，本模组内不再恢复。"
     already: "本次模组已接受过安抚，不再恢复理智。"
-    capped: "SAN 已达上限（{max_san}），安抚成功但没有恢复理智。"
+    capped: "理智已达上限（{max_san}），安抚成功但没有恢复理智。"
     failed: "安抚检定失败，目标不恢复理智。"
-    fumble: "安抚大失败：目标 SAN {old} → {new}（−{loss}）。"
+    fumble: "安抚大失败：目标的理智 {old} → {new}（−{loss}）。"
     ends_shock: "本次已结束惊骇（余悸仍在，直到当天结束）。"
     reality_check: "目标已异变：其「现实检验」检定可获 1 颗奖励骰。"
   initiative:
@@ -622,7 +623,7 @@ output:
       未填写的 COC 常见技能会自动使用默认值，例如侦查25、图书馆20、闪避=敏捷/2；艺术/科学/外语/生存等专业技能也会识别括号内容。
       Dice! 兼容短写：!r、.rb、.rp、.hl、.nn 也可以直接使用。
       进阶骰式用法：.dicehelp expr
-      .sc <成功扣除>/<失败扣除> : 进行 SAN 检定并扣除理智；单次损失 ≥5 点时触发惊骇 INT 检定。
+      .sc <成功扣除>/<失败扣除> : 进行理智检定并扣除理智；单次损失 ≥5 点时触发惊骇智力检定。
       .ra 安抚 @某人 : 安抚只能用于他人；成功恢复 2 点理智（不超上限），本模组每人一次。
       .shock : 场外惊骇，随机给出三个 1-10 编号，kp 自备表格按编号挑选。
       .ti / .li : 旧版症状表已停用，仅返回弃用提示。

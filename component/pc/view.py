@@ -2,11 +2,17 @@ import re
 from typing import Iterable, List
 
 from ..common.output import get_output
-from .attributes import SYNONYMS, find_attribute_key
+from .attributes import (
+    SYNONYMS,
+    find_attribute_key,
+    format_attribute_display_value,
+    get_attribute_display_name,
+)
 from .store import is_hidden_coc_skill
 
 
 def get_primary_attributes(attributes: dict) -> dict:
+    """按「中文显示名」归并属性：同义键只留一条，英文键换成中文名。"""
     primary_attributes = {}
     for attr, value in attributes.items():
         if is_hidden_coc_skill(attr):
@@ -14,19 +20,20 @@ def get_primary_attributes(attributes: dict) -> dict:
         primary_name = SYNONYMS.SYNONYM_MAP.get(attr, attr)
         if is_hidden_coc_skill(primary_name):
             continue
-        if primary_name not in primary_attributes:
-            primary_attributes[primary_name] = (attr, value)
+        display_name = get_attribute_display_name(primary_name)
+        if display_name not in primary_attributes:
+            primary_attributes[display_name] = (attr, value)
         else:
-            current_attr = primary_attributes[primary_name][0]
+            current_attr = primary_attributes[display_name][0]
             if current_attr != primary_name and attr == primary_name:
-                primary_attributes[primary_name] = (attr, value)
+                primary_attributes[display_name] = (attr, value)
     return primary_attributes
 
 
 def format_all_attributes(chara_data: dict) -> str:
     output_list = []
-    for primary_name, (_original_attr, value) in sorted(get_primary_attributes(chara_data.get("attributes", {})).items()):
-        output_list.append(f"{primary_name}: {value}")
+    for display_name, (_original_attr, value) in sorted(get_primary_attributes(chara_data.get("attributes", {})).items()):
+        output_list.append(f"{display_name}: {format_attribute_display_value(value)}")
     return get_output(
         "pc.show.all",
         name=chara_data["name"],
@@ -36,14 +43,13 @@ def format_all_attributes(chara_data: dict) -> str:
 
 def format_threshold_attributes(attributes: dict, threshold: int, header_prefix: str = "") -> str:
     output_parts = []
-    for attr, value in attributes.items():
-        if is_hidden_coc_skill(attr):
-            continue
+    for display_name, (_attr, value) in sorted(get_primary_attributes(attributes).items()):
         try:
-            if value > threshold:
-                output_parts.append(f"路 {attr}: {value}")
+            if value <= threshold:
+                continue
         except TypeError:
             continue
+        output_parts.append(f"· {display_name}: {format_attribute_display_value(value)}")
 
     if not output_parts:
         return get_output("pc.show.none_above", num=threshold)
@@ -63,7 +69,11 @@ def format_named_attributes(chara_data: dict, keys: Iterable[str], header_prefix
             continue
         resolved_key = find_attribute_key(attributes, key)
         if resolved_key is not None:
-            found_attrs.append(get_output("pc.show.attr", attr=key, value=attributes[resolved_key]))
+            found_attrs.append(get_output(
+                "pc.show.attr",
+                attr=get_attribute_display_name(resolved_key),
+                value=format_attribute_display_value(attributes[resolved_key]),
+            ))
         elif key not in chara_data.get("name", ""):
             not_found_attrs.append(key)
 
