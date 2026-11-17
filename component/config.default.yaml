@@ -414,6 +414,7 @@ output:
     not_enough: "选择项不足：请使用 .choose 选项A 选项B，或用 /、|、逗号分隔。"
     result: "随机选择：{choice}"
   san:
+    no_args: "请提供理智损失，例如 .sc 0/1d6（成功损失/失败损失）；也可 .sc 1d6/1d10。"
     result:
       success: "成功"
       failure: "失败"

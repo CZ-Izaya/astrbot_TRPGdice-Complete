@@ -39,6 +39,7 @@ from .component.pc.view import (
     format_named_attributes,
     format_threshold_attributes,
     get_primary_attributes,
+    sort_display_attributes,
 )
 from .component.pc.nick import build_card_by_mode
 from .component.pc.names import USAGE as NAME_USAGE, parse_name_request, generate_faker_names, generate_llm_names
@@ -258,6 +259,28 @@ class DicePlugin(Star):
         if '@' in text:
             text = text.split('@')[0]
         return text.strip()
+
+    @staticmethod
+    def _group_text_payload(group_id, text) -> dict:
+        """群聊纯文本发送：不引用上一条消息、不加前导空行。
+
+        要不要 @、要不要引用由 AstrBot / 平台侧自行配置，插件不硬编码。
+        """
+        return {
+            "group_id": group_id,
+            "message": [{"type": "text", "data": {"text": str(text or "").strip()}}],
+        }
+
+    @staticmethod
+    def _claim_once(event: AstrMessageEvent, key: str) -> bool:
+        """同一事件同一 key 只处理一次，避免多条分发路径重复回复。"""
+        try:
+            if event.get_extra(key):
+                return False
+            event.set_extra(key, True)
+            return True
+        except Exception:
+            return True
 
     def _coc_state_lines(self, attributes: dict) -> list:
         """人物卡末尾的状态行：当前精神状态（阈值与累计损失已在属性列表中显示）。"""
@@ -1161,14 +1184,7 @@ class DicePlugin(Star):
 
         # 让 dice 模块处理表达式并返回由 get_output 格式化好的文本（或错误文本）
         result_text = dice_mod.handle_roll_dice(message if message else f"1d{dice_mod.DEFAULT_DICE}", name = ret, remark = remark)
-        message_id = event.message_obj.message_id
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": message_id}},
-                {"type": "text", "data": {"text": "\n" + result_text}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, result_text)
         
         await self.save_log(group_id = event.get_group_id(), content = result_text, event=event)
         
@@ -1196,15 +1212,7 @@ class DicePlugin(Star):
 
         ret = await self._actor_label(event, group_id, user_id)
         text = get_output("dice.vampire.success", result=result_body, name = ret)
-        
-        message_id = event.message_obj.message_id
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": message_id}},
-                {"type": "text", "data": {"text": "\n" + text}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, text)
 
         await self.save_log(group_id = event.get_group_id(), content = text, event=event)
         
@@ -1246,8 +1254,9 @@ class DicePlugin(Star):
         if not self._command_enabled(event):
             return
         if not attributes:
-            # 空参数不再静默：给一句用法提示
-            yield event.plain_result(get_output("pc.update.no_args"))
+            # 空参数不再静默：给一句用法提示（多条分发路径只回一次）
+            if self._claim_once(event, "st_no_args"):
+                yield event.plain_result(get_output("pc.update.no_args"))
             return
 
         if attributes in COMMANDS :
@@ -1427,8 +1436,15 @@ class DicePlugin(Star):
 
     @command_group("st")
     async def st(self, event: AstrMessageEvent, attributes: str = None, exp : str = None):
-        """人物卡属性更新 / 掷骰"""
-        pass
+        """人物卡属性更新 / 掷骰
+
+        AstrBot 的指令组过滤器在「只有组名、没有子指令」时会抛「参数不足」，
+        裸 .st 因此拿不到任何回应；这里补一句用法提示。带参数的 .st 由 status() 处理。
+        """
+        if self._command_args_after(event, r"st"):
+            return
+        if self._claim_once(event, "st_no_args"):
+            yield event.plain_result(get_output("pc.update.no_args"))
 
 
     @st.command("show")
@@ -1505,7 +1521,7 @@ class DicePlugin(Star):
             chara_attrs = chara_data.get("attributes", {})
 
             output_list = []
-            for display_name, (original_attr, value) in sorted(get_primary_attributes(chara_attrs).items()):
+            for display_name, _original_attr, value in sort_display_attributes(get_primary_attributes(chara_attrs)):
                 output_list.append(f"{display_name}: {format_attribute_display_value(value)}")
 
             output_list.extend(self._coc_state_lines(chara_attrs))
@@ -1519,11 +1535,10 @@ class DicePlugin(Star):
         if len(valid_words) == 1 and valid_words[0].isdigit():
             threshold = int(valid_words[0])
             output_parts = []
-            for display_name, (_attr, value) in sorted(get_primary_attributes(chara_attrs).items()):
-                try:
-                    if value <= threshold:
-                        continue
-                except TypeError:
+            for display_name, _attr, value in sort_display_attributes(get_primary_attributes(chara_attrs)):
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+                if value <= threshold:
                     continue
                 output_parts.append(
                     f"· {display_name}: {format_attribute_display_value(value)}"
@@ -2502,13 +2517,7 @@ class DicePlugin(Star):
         
         result_message = dice_mod.roll_attribute(roll_times, skill_name, skill_value, str(group_id), ret)
 
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "text", "data": {"text": "\n" + result_message}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, result_message)
         await self.save_log(group_id = event.get_group_id(), content = result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
@@ -2523,13 +2532,7 @@ class DicePlugin(Star):
             ret = get_output("skill_check.proxy_name", name=ret, operator=await self._actor_label(event, group_id, event.get_sender_id()))
 
         result_message = dice_mod.roll_attribute_until_success(skill_name, skill_value, str(group_id), ret)
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "text", "data": {"text": "\n" + result_message}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, result_message)
         await self.save_log(group_id=group_id, content=result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
@@ -2548,13 +2551,7 @@ class DicePlugin(Star):
 
         result_message = dice_mod.roll_attribute_penalty(roll_times, dice_count, skill_name, skill_value, str(group_id), ret)
 
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "text", "data": {"text": "\n" + result_message}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, result_message)
 
         await self.save_log(group_id = event.get_group_id(), content = result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
@@ -2574,13 +2571,7 @@ class DicePlugin(Star):
 
         result_message = dice_mod.roll_attribute_bonus(roll_times, dice_count, skill_name, skill_value, str(group_id), ret)
 
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "text", "data": {"text": "\n" + result_message}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, result_message)
 
         await self.save_log(group_id = event.get_group_id(), content = result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
@@ -2681,25 +2672,7 @@ class DicePlugin(Star):
 
         user_name = await self._actor_label(event, group_id, user_id)
         client = event.bot  # 获取机器人 Client
-        message_id = event.message_obj.message_id
-
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {
-                    "type": "reply",
-                    "data": {
-                        "id": message_id
-                    }
-                },
-                {
-                    "type": "text",
-                    "data": {
-                        "text": "\n" + result_str
-                    }
-                }
-            ]
-        }
+        payloads = self._group_text_payload(group_id, result_str)
 
         await self.save_log(group_id = event.get_group_id(), content = result_str, event=event)
         await client.api.call_action("send_group_msg", **payloads)
@@ -2717,6 +2690,10 @@ class DicePlugin(Star):
         if str(loss_formula or "").strip().lower() in {"reset", "清零", "归零"}:
             async for result in self.pc_san_reset(event, target_user_id):
                 yield result
+            return
+        # 公式缺失或不合法时只提示用法，不再让 san_check 抛异常
+        if not sanity.is_valid_loss_formula(loss_formula):
+            yield event.plain_result(get_output("san.no_args"))
             return
 
         user_id = target_user_id or event.get_sender_id()
@@ -2736,19 +2713,16 @@ class DicePlugin(Star):
         charmod.ensure_state_fields(attrs)
 
         text = self._apply_san_check(chara_data, loss_formula, str(group_id))
+        if text is None:
+            yield event.plain_result(get_output("san.no_args"))
+            return
 
         charmod.save_character(group_id, user_id, chara_data["id"], chara_data, rule_system=rule_system)
 
         if event.get_platform_name() == "aiocqhttp":
             await self._update_user_nickname_card(client, group_id, user_id)
 
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "text", "data": {"text": "\n" + text}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, text)
 
         await self.save_log(group_id = event.get_group_id(), content = text, event=event)
 
@@ -2759,7 +2733,11 @@ class DicePlugin(Star):
         """
         执行一次理智检定：扣 SAN、累加本章损失、惊骇 INT 检定、异变与迷失判定。
         返回给玩家看的文本；人物卡对象已在内存中改好，调用方负责写盘。
+        公式不合法时返回 None，调用方应改为提示用法、不要写盘。
         """
+        if not sanity.is_valid_loss_formula(loss_formula):
+            return None
+
         attrs = chara_data.setdefault("attributes", {})
         charmod.ensure_state_fields(attrs)
 
@@ -3009,13 +2987,7 @@ class DicePlugin(Star):
 
         text = message + ("\n" + "\n".join(notes) if notes else "")
 
-        payloads = {
-            "group_id": group_id,
-            "message": [
-                {"type": "reply", "data": {"id": event.message_obj.message_id}},
-                {"type": "text", "data": {"text": "\n" + text}}
-            ]
-        }
+        payloads = self._group_text_payload(group_id, text)
 
         await self.save_log(group_id=group_id, content=text, event=event)
         await event.bot.api.call_action("send_group_msg", **payloads)
@@ -3603,6 +3575,11 @@ class DicePlugin(Star):
         elif cmd == "sc":
             async for result in self.pc_san_check(event, expr, target_user_id):
                 yield result
+        elif cmd == "st":
+            # 裸 .st：AstrBot 指令组在无子指令时会抛「参数不足」，这里补一句用法提示；
+            # 带参数的 .st 交给 status()，不在这里重复处理。
+            if not expr and self._claim_once(event, "st_no_args"):
+                yield event.plain_result(get_output("pc.update.no_args"))
         elif cmd == "shock":
             async for result in self.pc_offstage_shock(event, expr):
                 yield result
@@ -3698,14 +3675,24 @@ class DicePlugin(Star):
             if str(expr or "").strip().lower() in {"reset", "清零", "归零"}:
                 yield event.plain_result(get_output("san.reset.denied"))
                 return
+            if not sanity.is_valid_loss_formula(expr):
+                yield event.plain_result(get_output("san.no_args"))
+                return
             chara_data = charmod.get_current_character(context_id, user_id, rule_system=rule_system)
             if not chara_data:
                 yield event.plain_result(get_output("pc.show.no_active"))
                 return
 
             text = self._apply_san_check(chara_data, expr, context_id)
+            if text is None:
+                yield event.plain_result(get_output("san.no_args"))
+                return
             charmod.save_character(context_id, user_id, chara_data["id"], chara_data, rule_system=rule_system)
             yield event.plain_result(text)
+        elif cmd == "st":
+            # 私聊里的裸 .st 同样给用法提示，其余 .st 子指令仍不支持
+            if not expr and self._claim_once(event, "st_no_args"):
+                yield event.plain_result(get_output("pc.update.no_args"))
         elif cmd == "shock":
             async for result in self.pc_offstage_shock(event, expr):
                 yield result

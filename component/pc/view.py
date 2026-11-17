@@ -10,6 +10,58 @@ from .attributes import (
 )
 from .store import is_hidden_coc_skill
 
+# 说明性信息（上限、阈值、本章累计、状态位）排在属性列表最后，顺序固定。
+COC_TAIL_DISPLAY_ORDER = (
+    "体力上限",
+    "理智上限",
+    "魔法上限",
+    "异变阈值",
+    "本章累计损失",
+    "异变",
+    "惊骇中",
+    "余悸",
+    "迷失",
+    "安抚已手动加点",
+    "安抚本章已用",
+)
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def sort_display_attributes(primary_attributes: dict) -> list:
+    """
+    排序规则：数值从大到小；说明性信息（上限/阈值/累计/状态）统一放到最后。
+    返回 [(display_name, original_attr, value), ...]
+    """
+    main_items = []
+    tail_items = []
+    for display_name, (original_attr, value) in primary_attributes.items():
+        item = (display_name, original_attr, value)
+        if display_name in COC_TAIL_DISPLAY_ORDER:
+            tail_items.append(item)
+        else:
+            main_items.append(item)
+
+    def main_key(item):
+        display_name, _attr, value = item
+        if _is_number(value):
+            return (0, -float(value), display_name)
+        # 非数值属性排在数值之后，按名字排
+        return (1, 0.0, display_name)
+
+    def tail_key(item):
+        display_name = item[0]
+        try:
+            return (0, COC_TAIL_DISPLAY_ORDER.index(display_name))
+        except ValueError:
+            return (1, len(COC_TAIL_DISPLAY_ORDER))
+
+    main_items.sort(key=main_key)
+    tail_items.sort(key=tail_key)
+    return main_items + tail_items
+
 
 def get_primary_attributes(attributes: dict) -> dict:
     """按「中文显示名」归并属性：同义键只留一条，英文键换成中文名。"""
@@ -32,7 +84,9 @@ def get_primary_attributes(attributes: dict) -> dict:
 
 def format_all_attributes(chara_data: dict) -> str:
     output_list = []
-    for display_name, (_original_attr, value) in sorted(get_primary_attributes(chara_data.get("attributes", {})).items()):
+    for display_name, _original_attr, value in sort_display_attributes(
+        get_primary_attributes(chara_data.get("attributes", {}))
+    ):
         output_list.append(f"{display_name}: {format_attribute_display_value(value)}")
     return get_output(
         "pc.show.all",
@@ -43,11 +97,10 @@ def format_all_attributes(chara_data: dict) -> str:
 
 def format_threshold_attributes(attributes: dict, threshold: int, header_prefix: str = "") -> str:
     output_parts = []
-    for display_name, (_attr, value) in sorted(get_primary_attributes(attributes).items()):
-        try:
-            if value <= threshold:
-                continue
-        except TypeError:
+    for display_name, _attr, value in sort_display_attributes(get_primary_attributes(attributes)):
+        if not _is_number(value):
+            continue
+        if value <= threshold:
             continue
         output_parts.append(f"· {display_name}: {format_attribute_display_value(value)}")
 

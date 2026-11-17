@@ -25,13 +25,38 @@ with open(PLUGIN_DIR + "/../data/phobias.json", "r", encoding="utf-8") as f:
 with open(PLUGIN_DIR + "/../data/mania.json", "r", encoding="utf-8") as f:
     manias = json.load(f)["manias"]
 
+LOSS_TERM = re.compile(r"([0-9]+)d([0-9]+)([+-][0-9]+)?")
+
+def is_valid_loss_term(term) -> bool:
+    """单个损失项是否合法：纯数字或 XdY[+-N]。"""
+    text = "" if term is None else str(term).strip().lower()
+    if not text:
+        return False
+    return text.isdigit() or bool(LOSS_TERM.fullmatch(text))
+
+def is_valid_loss_formula(formula) -> bool:
+    """
+    判断理智损失公式是否可用：成功/失败两段都必须是合法损失项。
+    例如 "1d6/1d10"、"1/1d6"、"0" 合法；""、"abc"、"1d6/" 非法。
+    """
+    text = "" if formula is None else str(formula).strip().lower()
+    if not text:
+        return False
+    parts = [part.strip() for part in text.split("/")]
+    if len(parts) > 2:
+        return False
+    return all(is_valid_loss_term(part) for part in parts)
+
 def parse_san_loss_formula(formula: str):
     """
     解析 SAN 损失公式，返回成功和失败时的损失表达式。
     例如 "1d6/1d10" -> ("1d6", "1d10")
     例如 "1d6+1/1d10-1" -> ("1d6+1", "1d10-1")
     """
-    parts = formula.split("/")
+    text = "" if formula is None else str(formula).strip().lower()
+    if not text:
+        raise ValueError("Empty san loss formula")
+    parts = [part.strip() for part in text.split("/")]
     
     # 成功部分就是分隔符前的部分
     success_part = parts[0]
@@ -40,6 +65,9 @@ def parse_san_loss_formula(formula: str):
     # 否则失败部分和成功部分相同
     failure_part = parts[1] if len(parts) > 1 else parts[0]
     
+    if not is_valid_loss_term(success_part) or not is_valid_loss_term(failure_part):
+        raise ValueError(f"Invalid san loss formula: {formula}")
+
     return success_part, failure_part
 
 def roll_loss(loss_expr: str):
@@ -49,7 +77,8 @@ def roll_loss(loss_expr: str):
     例如： "1d6", "1d6+1", "1d6-2"
     """
     # 处理加法和减法
-    match = re.fullmatch(r"(\d+)d(\d+)([+-]\d+)?", loss_expr)
+    expr_text = "" if loss_expr is None else str(loss_expr).strip().lower()
+    match = LOSS_TERM.fullmatch(expr_text)
     if match:
         num_dice, dice_size, modifier = match.groups()
         num_dice = int(num_dice)
@@ -81,9 +110,12 @@ def roll_loss(loss_expr: str):
         return total_loss, expr
     
     # 纯数字情况，直接返回
-    elif loss_expr.isdigit():
-        loss = int(loss_expr)
+    elif expr_text.isdigit():
+        loss = int(expr_text)
         return max(0, loss), f"{loss}"
+
+    # 走到这里说明公式不可用：明确报错，不再返回 None 让调用方 unpack 崩掉
+    raise ValueError(f"Invalid san loss expression: {loss_expr}")
 
 def san_check(chara_data: dict, loss_formula: str):
     """
