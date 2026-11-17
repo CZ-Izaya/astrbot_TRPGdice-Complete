@@ -32,7 +32,6 @@ COC_PRIMARY_DISPLAY_ORDER = (
     "体质",
     "外貌",
     "智力",
-    "灵感",
     "意志",
     "教育",
     "体型",
@@ -44,9 +43,6 @@ COC_PRIMARY_DISPLAY_ORDER = (
 
 # 数值属性与说明性信息之间的分隔线
 COC_TAIL_SEPARATOR = "——————"
-
-# 与其它属性同义、但卡面上单独占一行的显示名（检定仍按同义键解析）
-COC_INDEPENDENT_DISPLAY_NAMES = frozenset({"灵感"})
 
 
 def _is_number(value) -> bool:
@@ -100,11 +96,6 @@ def get_primary_attributes(attributes: dict) -> dict:
     primary_attributes = {}
     for attr, value in attributes.items():
         if is_hidden_coc_skill(attr):
-            continue
-        # 灵感虽与智力同义（检定仍走智力），但卡面单独占一行
-        if str(attr) in COC_INDEPENDENT_DISPLAY_NAMES:
-            display_name = str(attr)
-            primary_attributes.setdefault(display_name, (attr, value))
             continue
         primary_name = SYNONYMS.SYNONYM_MAP.get(attr, attr)
         if is_hidden_coc_skill(primary_name):
