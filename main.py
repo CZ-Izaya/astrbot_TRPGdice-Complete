@@ -155,7 +155,7 @@ async def get_sender_nickname(client, group_id, sender_id) :
 async def init():
     await logger_core.initialize()
 
-@register("astrbot_plugin_TRPG", "shiroling", "TRPG玩家用骰", "v2.3.2")
+@register("astrbot_plugin_TRPG", "shiroling", "TRPG玩家用骰", "CZ-Izaya v1.0.0")
 class DicePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         self.wakeup_prefix = [".", "。", "/", "!", "！"]
@@ -292,6 +292,18 @@ class DicePlugin(Star):
         if charmod.is_bare_religion_skill(name):
             return get_output("skill_check.religion_specialty")
         return None
+
+    def _command_args_after(self, event: AstrMessageEvent, pattern: str) -> Optional[str]:
+        """取命令名之后的全部原文，规避 AstrBot 位置参数按词截断的问题。
+
+        与 .pc class / .pc version / .pc res 里已有的读原文写法保持一致：
+        AstrBot 的 CommandFilter 会按空格把消息切成词，逐词塞进形参，
+        形参之外的词会被直接丢弃，因此长参数指令必须自己回读原文。
+        """
+        raw = self._strip_at_text(event.get_message_str())
+        command = strip_command_prefix(raw, self.wakeup_prefix) or raw
+        match = re.match(rf"^(?:{pattern})(?:\s+|$)(.*)$", command, re.I | re.S)
+        return match.group(1).strip() if match else None
 
     def _parse_admin_ids(self, raw) -> set:
         ids = set()
@@ -1248,7 +1260,12 @@ class DicePlugin(Star):
             return
 
         chara_data = charmod.load_character(group_id, user_id, chara_id, rule_system=rule_system)
-        full_expr = self._strip_at_text((str(attributes) if attributes else "") + (str(exp) if exp else ""))
+        # .st 走原文整串（支持一次粘贴整张卡）；被 .pc update 调用时用传入的表达式
+        raw_expr = self._command_args_after(event, r"st")
+        if raw_expr is not None:
+            full_expr = raw_expr
+        else:
+            full_expr = self._strip_at_text((str(attributes) if attributes else "") + (str(exp) if exp else ""))
         try:
             entries = parse_st_expression(full_expr)
         except ValueError:
@@ -1411,6 +1428,8 @@ class DicePlugin(Star):
         .st show [属性...] [@某人] / .st show [数字] / .st show
         (V4 - 支持 @ 其他玩家查看其属性，智能过滤群名片残留)
         """
+        # .st show 支持多属性/多个词，需回读原文
+        args_str = self._command_args_after(event, r"st\s+show") or args_str
         group_id = str(event.get_group_id())
         
         # --- 1. 解析目标用户 (识别是否 @ 了别人) ---
@@ -1592,7 +1611,7 @@ class DicePlugin(Star):
             yield event.plain_result(get_output("pc.show.load_fail", id=chara_id))
             return
             
-        args_str = args_str.strip()
+        args_str = (self._command_args_after(event, r"st\s+del") or args_str).strip()
         if not args_str:
             yield event.plain_result(get_output("pc.del.no_args"))
             return
@@ -1735,7 +1754,7 @@ class DicePlugin(Star):
         """
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
-        args_str = args_str.strip()
+        args_str = (self._command_args_after(event, r"st\s+export") or args_str).strip()
         chara_id = charmod.get_current_character_id(group_id, user_id, rule_system=rule_system)
 
         if args_str:
@@ -2154,7 +2173,7 @@ class DicePlugin(Star):
         """
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
-        args_str = args_str.strip()
+        args_str = (self._command_args_after(event, r"pc\s+show") or args_str).strip()
         chara_id = charmod.get_current_character_id(group_id, user_id, rule_system=rule_system)
 
         if args_str:
@@ -2201,7 +2220,7 @@ class DicePlugin(Star):
     async def pc_update_character(self, event, *, args_str: str = ""):
         if not self._command_enabled(event):
             return
-        args_str = args_str.strip()
+        args_str = (self._command_args_after(event, r"pc\s+update") or args_str).strip()
         if not args_str:
             yield event.plain_result(get_output("pc.update.error_format"))
             return
@@ -3390,6 +3409,8 @@ class DicePlugin(Star):
     async def _choose_impl(self, event: AstrMessageEvent, args_str: str = ""):
         if not self._command_enabled(event):
             return
+        # 选项通常以空格分隔，需回读原文，否则只剩第一个选项
+        args_str = self._command_args_after(event, r"choose|choice") or args_str
         yield event.plain_result(dice_mod.choose_option(args_str))
 
     @filter.command("choose")
